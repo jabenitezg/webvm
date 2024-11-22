@@ -1,4 +1,4 @@
-FROM --platform=linux/i386 docker.io/i386/debian:buster
+FROM --platform=i386 i386/debian:buster
 ARG DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get -y upgrade && apt-get -y install bash
