@@ -1,5 +1,6 @@
 <script>
-	import { onMount } from 'svelte';
+	import { onMount, tick } from 'svelte';
+	import { get } from 'svelte/store';
 	import Nav from 'labs/packages/global-navbar/src/Nav.svelte';
 	import SideBar from '$lib/SideBar.svelte';
 	import '$lib/global.css';
@@ -8,6 +9,8 @@
 	import { networkInterface, startLogin } from '$lib/network.js'
 	import { cpuActivity, diskActivity, cpuPercentage, diskLatency } from '$lib/activities.js'
 	import { introMessage, errorMessage, unexpectedErrorMessage } from '$lib/messages.js'
+	import { displayConfig, handleToolImpl } from '$lib/anthropic.js'
+	import { tryPlausible } from '$lib/plausible.js'
 
 	export let configObj = null;
 	export let processCallback = null;
@@ -23,6 +26,7 @@
 	var blockCache = null;
 	var processCount = 0;
 	var curVT = 0;
+	var sideBarPinned = false;
 	function writeData(buf, vt)
 	{
 		if(vt != 1)
@@ -136,16 +140,30 @@
 	}
 	function setScreenSize(display)
 	{
-		var mult = 1.0;
+		var internalMult = 1.0;
 		var displayWidth = display.offsetWidth;
 		var displayHeight = display.offsetHeight;
 		var minWidth = 1024;
 		var minHeight = 768;
 		if(displayWidth < minWidth)
-			mult = minWidth / displayWidth;
+			internalMult = minWidth / displayWidth;
 		if(displayHeight < minHeight)
-			mult = Math.max(mult, minHeight / displayHeight);
-		cx.setKmsCanvas(display, displayWidth * mult, displayHeight * mult);
+			internalMult = Math.max(internalMult, minHeight / displayHeight);
+		var internalWidth = Math.floor(displayWidth * internalMult);
+		var internalHeight = Math.floor(displayHeight * internalMult);
+		cx.setKmsCanvas(display, internalWidth, internalHeight);
+		// Compute the size to be used for AI screenshots
+		var screenshotMult = 1.0;
+		var maxWidth = 1024;
+		var maxHeight = 768;
+		if(internalWidth > maxWidth)
+			screenshotMult = maxWidth / internalWidth;
+		if(internalHeight > maxHeight)
+			screenshotMult = Math.min(screenshotMult, maxHeight / internalHeight);
+		var screenshotWidth = Math.floor(internalWidth * screenshotMult);
+		var screenshotHeight = Math.floor(internalHeight * screenshotMult);
+		// Track the state of the mouse as requested by the AI, to avoid losing the position due to user movement
+		displayConfig.set({width: screenshotWidth, height: screenshotHeight, mouseMult: internalMult * screenshotMult});
 	}
 	var curInnerWidth = 0;
 	var curInnerHeight = 0;
@@ -156,6 +174,10 @@
 			return;
 		curInnerWidth = window.innerWidth;
 		curInnerHeight = window.innerHeight;
+		triggerResize();
+	}
+	function triggerResize()
+	{
 		term.options.fontSize = computeXTermFontSize();
 		fitAddon.fit();
 		const display = document.getElementById("display");
@@ -213,7 +235,7 @@
 		// Raise the display to the foreground
 		const display = document.getElementById("display");
 		display.parentElement.style.zIndex = 5;
-		plausible("Display activated");
+		tryPlausible("Display activated");
 	}
 	function handleProcessCreated()
 	{
@@ -239,7 +261,7 @@
 					if(configObj.diskImageUrl.startsWith(wssProtocol))
 					{
 						// WebSocket protocol failed, try agin using plain HTTP
-						plausible("WS Disk failure");
+						tryPlausible("WS Disk failure");
 						blockDevice = await CheerpX.CloudDevice.create("https:" + configObj.diskImageUrl.substr(wssProtocol.length));
 					}
 					else
@@ -276,6 +298,8 @@
 			{type:"devpts", path:"/dev/pts"},
 			// The Linux 'proc' filesystem which provides information about running processes
 			{type:"proc", path:"/proc"},
+			// The Linux 'sysfs' filesystem which is used to enumerate emulated devices
+			{type:"sys", path:"/sys"},
 			// Convenient access to sample documents in the user directory
 			{type:"dir", dev:documentsDevice, path:"/home/user/documents"}
 		];
@@ -322,20 +346,32 @@
 		await blockCache.reset();
 		location.reload();
 	}
+	async function handleTool(tool)
+	{
+		return await handleToolImpl(tool, term);
+	}
+	async function handleSidebarPinChange(event)
+	{
+		sideBarPinned = event.detail;
+		// Make sure the pinning state of reflected in the layout
+		await tick();
+		// Adjust the layout based on the new sidebar state
+		triggerResize();
+	}
 </script>
 
 <main class="relative w-full h-full">
 	<Nav />
 	<div class="absolute top-10 bottom-0 left-0 right-0">
-		<SideBar on:connect={handleConnect} on:reset={handleReset}>
+		<SideBar on:connect={handleConnect} on:reset={handleReset} handleTool={!configObj.needsDisplay || curVT == 7 ? handleTool : null} on:sidebarPinChange={handleSidebarPinChange}>
 			<slot></slot>
 		</SideBar>
 		{#if configObj.needsDisplay}
-			<div class="absolute top-0 bottom-0 left-14 right-0">
+			<div class="absolute top-0 bottom-0 {sideBarPinned ? 'left-[23.5rem]' : 'left-14'} right-0">
 				<canvas class="w-full h-full cursor-none" id="display"></canvas>
 			</div>
 		{/if}
-		<div class="absolute top-0 bottom-0 left-14 right-0 p-1 scrollbar" id="console">
+		<div class="absolute top-0 bottom-0 {sideBarPinned ? 'left-[23.5rem]' : 'left-14'} right-0 p-1 scrollbar" id="console">
 		</div>
 	</div>
 </main>
